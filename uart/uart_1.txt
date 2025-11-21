@@ -1,0 +1,48 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/uart.h"
+#include "esp_log.h"
+
+#define UART_PORT UART_NUM_1
+#define TX_PIN 17
+#define RX_PIN 16
+#define BUF_SIZE 1024
+
+static const char *TAG = "Transmitter";
+
+// Task A: Generate temperature
+float generate_temperature() {
+    float temp = 20.0 + (rand() % 1000) / 50.0;  // random between 20.0–40.0
+    return temp;
+}
+
+// Task B: Send via UART
+void uart_tx_task(void *arg) {
+    char msg[32];
+    while (1) {
+        float temperature = generate_temperature();
+        snprintf(msg, sizeof(msg), "%.1f\n", temperature);
+        uart_write_bytes(UART_PORT, msg, strlen(msg));
+        ESP_LOGI(TAG, "Sent: %s", msg);
+        vTaskDelay(pdMS_TO_TICKS(2000));  // every 2 seconds
+    }
+}
+
+void app_main() {
+    const uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+
+    uart_param_config(UART_PORT, &uart_config);
+    uart_set_pin(UART_PORT, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(UART_PORT, BUF_SIZE, 0, 0, NULL, 0);
+
+    xTaskCreate(uart_tx_task, "uart_tx_task", 2048, NULL, 5, NULL);
+}

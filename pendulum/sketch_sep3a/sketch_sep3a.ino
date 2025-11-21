@@ -1,0 +1,166 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+const int PIN_IRSENSOR = 4;
+const int PIN_BUZZER = 5;
+const int PIN_TOUCH = T7;
+const int PIN_PUSHBTN = 19;
+
+const int COUNT_THRHLD = 25;
+const int BUZZER_BEEP_DELAY = 50;
+const int BUZZER_RPT_COUNT = 25;
+const int BUZZER_RPT_DELAY = 100;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+void beep_buzzer(int delay = BUZZER_BEEP_DELAY){
+digitalWrite(PIN_BUZZER, HIGH);
+vTaskDelay(pdMS_TO_TICKS(delay));
+digitalWrite(PIN_BUZZER, LOW);
+}
+
+void lcd_clear() {
+lcd.setCursor(0, 0);
+lcd.print(" ");
+lcd.setCursor(0, 1);
+lcd.print(" ");
+}
+
+void lcd_print(int col, int row, const char *buf) {
+lcd_clear();
+lcd.setCursor(col, row);
+lcd.print(buf);
+}
+
+void lcd_print_count(int c) {
+char buffer[17];
+snprintf(buffer, sizeof(buffer), "Count: %d", c);
+lcd_print(0, 1, buffer);
+}
+
+volatile int count = 0;
+volatile bool has_pushbtn_pressed = false;
+volatile unsigned long last_time = 0;
+volatile unsigned long period = 0;
+
+SemaphoreHandle_t sh_buzzer;
+SemaphoreHandle_t sh_pushbtn_intpt;
+
+TaskHandle_t th_ir_sensor_read = NULL;
+TaskHandle_t th_pushbtn_intpt = NULL;
+TaskHandle_t th_lcd_print_count = NULL;
+
+void IRAM_ATTR itr_handle_pushbtn() {
+BaseType_t has_hptw = pdFALSE;
+xSemaphoreGiveFromISR(sh_pushbtn_intpt, &has_hptw);
+if (has_hptw) portYIELD_FROM_ISR(has_hptw);
+}
+
+// void IRAM_ATTR itr_handle_pushbtn() {
+// if(!has_pushbtn_pressed) has_pushbtn_pressed = true;
+// }
+
+void task_ir_sensor_read(void *p) {
+bool prev_state = false;
+
+while(1) {
+int ir_value = digitalRead(PIN_IRSENSOR);
+bool current_state = (ir_value == LOW);
+
+if(!current_state && prev_state) {
+++count;
+if(count >= COUNT_THRHLD) count = 0;
+
+unsigned long now = millis();
+if (last_time != 0) {
+period = 2* (now - last_time);
+}
+last_time = now;
+
+xTaskCreatePinnedToCore(
+task_buzzer_beep,
+"Beep",
+2048,
+NULL, 2, NULL, 1
+);
+xTaskCreatePinnedToCore(
+task_lcd_print_count,
+"LCD Print",
+2048,
+NULL, 2, NULL, 1
+);
+
+}
+
+prev_state = current_state;
+vTaskDelay(pdMS_TO_TICKS(10));
+}
+}
+
+void task_buzzer_beep(void *p) {
+if (xSemaphoreTake(sh_buzzer, pdMS_TO_TICKS(10)) == pdTRUE) {
+Serial.print("Count: ");
+Serial.println(count);
+beep_buzzer();
+xSemaphoreGive(sh_buzzer);
+}
+vTaskDelete(NULL);
+}
+
+// void task_pushbtn_intpt(void *p) {
+// while(1) {
+// if(has_pushbtn_pressed) {
+// count = 0;
+// lcd_print(0, 0, "Interrupt!");
+// lcd_print(0, 0, " ");
+// Serial.println("INTERRUPT!");
+// has_pushbtn_pressed = false;
+// }
+// }
+// // if(xSemaphoreTake(sh_pushbtn_intpt, portMAX_DELAY) == pdTRUE) {
+// // count = 0;
+// // lcd_print(0, 0, "Interrupt!");
+// // lcd_print(0, 0, " ");
+// // Serial.println("INTERRUPT!");
+// // }
+// // vTaskDelete(NULL);
+// // if(!has_pushbtn_pressed){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+// }
+
+void task_pushbtn_intpt(void *p) {
+while(1)
+if(xSemaphoreTake(sh_pushbtn_intpt, portMAX_DELAY) == pdTRUE) {
+count = 0;
+lcd_print(0, 0, "Interrupt!");
+lcd_print(0, 0, " ");
+Serial.println("INTERRUPT!");
+has_pushbtn_pressed = false;
+}
+}
+
+void task_lcd_print_count(void *p) {
+lcd_print_count(count);
+vTaskDelete(NULL);
+}
+
+void setup() {
+Serial.begin(115200);
+Wire.begin(21, 22);
+
+pinMode(PIN_BUZZER, OUTPUT);
+pinMode(PIN_IRSENSOR, INPUT);;
+pinMode(PIN_PUSHBTN, INPUT_PULLUP);
+
+lcd.init();
+lcd.backlight();
+
+sh_buzzer = xSemaphoreCreateMutex();
+sh_pushbtn_intpt = xSemaphoreCreateBinary();
+
+attachInterrupt(digitalPinToInterrupt(PIN_PUSHBTN), itr_handle_pushbtn, FALLING);
+
+xTaskCreatePinnedToCore(task_ir_sensor_read, "ir_sensor_read", 2048, NULL, 2, &th_ir_sensor_read, 1);
+xTaskCreatePinnedToCore(task_pushbtn_intpt, "pushbtn_intpt", 2048, NULL, 1, &th_pushbtn_intpt, 1);
+}
+
+void loop() {}

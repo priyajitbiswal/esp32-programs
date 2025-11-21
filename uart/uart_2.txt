@@ -1,0 +1,66 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "driver/uart.h"
+#include "driver/gpio.h"
+
+#define UART_PORT   UART_NUM_1
+#define TXD_PIN     17
+#define RXD_PIN     16
+#define LED_PIN     2
+#define BUF_SIZE    1024
+#define THRESHOLD   27.0
+#define SAMPLE_WINDOW 10
+
+static QueueHandle_t dataQueue;
+
+void TaskC_ReceiveUART(void *pvParameters) {
+    uint8_t data[32];
+    while (1) {
+        int len = uart_read_bytes(UART_PORT, data, sizeof(data) - 1, pdMS_TO_TICKS(500));
+        if (len > 0) {
+            data[len] = '\0';
+            float temp = atof((char*)data);
+            printf("Received: %.2f\n", temp);
+            xQueueSend(dataQueue, &temp, portMAX_DELAY);
+        }
+    }
+}
+
+void TaskD_ProcessData(void *pvParameters) {
+    float samples[SAMPLE_WINDOW];
+    int index = 0, count = 0;
+    float value;
+    while (1) {
+        if (xQueueReceive(dataQueue, &value, portMAX_DELAY) == pdTRUE) {
+            samples[index] = value;
+            index = (index + 1) % SAMPLE_WINDOW;
+            count = count < SAMPLE_WINDOW ? count + 1 : SAMPLE_WINDOW;
+            float sum = 0;
+            for (int i = 0; i < count; i++) sum += samples[i];
+            printf("Average of last %d samples: %.2f\n", count, sum / count);
+            gpio_set_level(LED_PIN, value > THRESHOLD);
+        }
+    }
+}
+
+void app_main(void) {
+    const uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+    uart_param_config(UART_PORT, &uart_config);
+    uart_set_pin(UART_PORT, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(UART_PORT, BUF_SIZE, BUF_SIZE, 0, NULL, 0);
+
+    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
+
+    dataQueue = xQueueCreate(10, sizeof(float));
+    xTaskCreate(TaskC_ReceiveUART, "TaskC_ReceiveUART", 4096, NULL, 2, NULL);
+    xTaskCreate(TaskD_ProcessData, "TaskD_ProcessData", 4096, NULL, 2, NULL);
+}
